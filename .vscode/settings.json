@@ -1,0 +1,20 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.extensionActivationMode": "always",
+  "clangd.path": "/home/franko/.espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/home/franko/prog/microcontroladores/projetos/projeto_final/esp_BLE_bridge/BLE_BRIDGE/build"
+  ],
+  "idf.currentSetup": "/home/franko/.espressif/v6.0.1/esp-idf",
+  "idf.openOcdConfigs": [
+    "board/esp32c3-builtin.cfg"
+  ],
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32c3",
+    "OPENOCD_USB_ADAPTER_LOCATION": "1-2.4"
+  },
+  "idf.flashType": "JTAG",
+  "idf.port": "/dev/ttyACM0"
+}
