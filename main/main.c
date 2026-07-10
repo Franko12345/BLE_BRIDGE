@@ -37,11 +37,11 @@
 
 #define RCV_HOST    SPI2_HOST
 
-#define GPIO_HANDSHAKE      2
-#define GPIO_MOSI           12
-#define GPIO_MISO           13
-#define GPIO_SCLK           15
-#define GPIO_CS             14
+#define GPIO_HANDSHAKE      10
+#define GPIO_MOSI           6
+#define GPIO_MISO           5
+#define GPIO_SCLK           4
+#define GPIO_CS             7
 
 //Called after a transaction is queued and ready for pickup by master. We use this to set the handshake line high.
 void my_post_setup_cb(spi_slave_transaction_t *trans)
@@ -57,6 +57,13 @@ void my_post_trans_cb(spi_slave_transaction_t *trans)
 
 
 static const char *TAG = "HID_MOUSE_DEMO";
+
+enum BT_STATE{
+    BT_CONNECTED,
+    BT_DISCONNECTED
+};
+
+static volatile enum BT_STATE state = BT_DISCONNECTED;
 
 typedef struct {
     TaskHandle_t task_hdl;
@@ -137,138 +144,9 @@ void send_mouse_absolute(uint8_t buttons, uint16_t x, uint16_t y)
 /* Task de demonstracao via serial: move o cursor para posicoes fixas
  * usando teclas de teste. Substitua pela sua fonte real de coordenadas
  * (touchscreen, sensor, etc.) */
-static void ble_hid_demo_task_mouse(void *pvParameters)
-{
-    static const char *help_string =
-        "########################################################################\n"
-        "BLE mouse absoluto - demo usage:\n"
-        "q -- clique botao esquerdo\n"
-        "e -- clique botao direito\n"
-        "1 -- ir para canto superior esquerdo (0,0)\n"
-        "2 -- ir para centro (16383,16383)\n"
-        "3 -- ir para canto inferior direito (32767,32767)\n"
-        "h -- mostrar essa ajuda\n"
-        "########################################################################\n";
-    printf("%s\n", help_string);
 
-    char c;
-    while (1) {
-        c = fgetc(stdin);
-        switch (c) {
-        case 'q':
-            send_mouse_absolute(0x01, 16383, 16383);
-            vTaskDelay(50 / portTICK_PERIOD_MS);
-            send_mouse_absolute(0x00, 16383, 16383);
-            break;
-        case 'e':
-            send_mouse_absolute(0x02, 16383, 16383);
-            vTaskDelay(50 / portTICK_PERIOD_MS);
-            send_mouse_absolute(0x00, 16383, 16383);
-            break;
-        case '1':
-            send_mouse_absolute(0x00, 0, 0);
-            break;
-        case '2':
-            send_mouse_absolute(0x00, 16383, 16383);
-            break;
-        case '3':
-            send_mouse_absolute(0x00, 32767, 32767);
-            break;
-        case 'h':
-            printf("%s\n", help_string);
-            break;
-        default:
-            break;
-        }
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-    }
-}
-
-void ble_hid_task_start_up(void)
-{
-    if (s_ble_hid_param.task_hdl) {
-        return; // task ja existe
-    }
-    xTaskCreate(ble_hid_demo_task_mouse, "ble_hid_demo_task_mouse", 3 * 1024, NULL,
-                configMAX_PRIORITIES - 3, &s_ble_hid_param.task_hdl);
-}
-
-static void ble_hid_task_shut_down(void)
-{
-    if (s_ble_hid_param.task_hdl) {
-        vTaskDelete(s_ble_hid_param.task_hdl);
-        s_ble_hid_param.task_hdl = NULL;
-    }
-}
-
-static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, int32_t id, void *event_data)
-{
-    esp_hidd_event_t event = (esp_hidd_event_t)id;
-    esp_hidd_event_data_t *param = (esp_hidd_event_data_t *)event_data;
-
-    switch (event) {
-    case ESP_HIDD_START_EVENT:
-        ESP_LOGI(TAG, "START");
-        esp_hid_ble_gap_adv_start();
-        break;
-
-    case ESP_HIDD_CONNECT_EVENT:
-        ESP_LOGI(TAG, "CONNECT");
-        break;
-
-    case ESP_HIDD_PROTOCOL_MODE_EVENT:
-        ESP_LOGI(TAG, "PROTOCOL MODE[%u]: %s", param->protocol_mode.map_index,
-                 param->protocol_mode.protocol_mode ? "REPORT" : "BOOT");
-        break;
-
-    case ESP_HIDD_CONTROL_EVENT:
-        ESP_LOGI(TAG, "CONTROL[%u]: %sSUSPEND", param->control.map_index,
-                 param->control.control ? "EXIT_" : "");
-        if (param->control.control) {
-            ble_hid_task_start_up();   // sai do suspend
-        } else {
-            ble_hid_task_shut_down();  // entra em suspend
-        }
-        break;
-
-    case ESP_HIDD_OUTPUT_EVENT:
-        ESP_LOGI(TAG, "OUTPUT[%u]: %8s ID: %2u, Len: %d, Data:",
-                 param->output.map_index, esp_hid_usage_str(param->output.usage),
-                 param->output.report_id, param->output.length);
-        ESP_LOG_BUFFER_HEX(TAG, param->output.data, param->output.length);
-        break;
-
-    case ESP_HIDD_DISCONNECT_EVENT:
-        ESP_LOGI(TAG, "DISCONNECT: %s",
-                 esp_hid_disconnect_reason_str(esp_hidd_dev_transport_get(param->disconnect.dev),
-                                                param->disconnect.reason));
-        ble_hid_task_shut_down();
-        esp_hid_ble_gap_adv_start();
-        break;
-
-    case ESP_HIDD_STOP_EVENT:
-        ESP_LOGI(TAG, "STOP");
-        break;
-
-    default:
-        break;
-    }
-}
-
-static void ble_hid_device_host_task(void *param)
-{
-    ESP_LOGI(TAG, "BLE Host Task Started");
-    nimble_port_run();      // so retorna quando nimble_port_stop() for chamado
-    nimble_port_freertos_deinit();
-}
-
-/* Definida em store.c do exemplo original (persistencia de bonding) */
-void ble_store_config_init(void);
-
-void app_main(void)
-{
-    //SPI
-    int n = 0;
+static void spi_reciever_thread(void *pvParameters){
+        int n = 0;
     esp_err_t ret;
 
     //Configuration for the SPI bus
@@ -304,71 +182,145 @@ void app_main(void)
     gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
     gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY);
 
-    /**
-     * The default drive capability on esp32 is GPIO_DRIVE_CAP_2 (~20 mA).
-     * When connecting master devices that uses a source/sink current lower or higher than GPIO_DRIVER_CAP_DEFAULT.
-     * Using a drive strength that does not match the requirements of the connected device can cause issues
-     * such as unreliable switching, or damage to the GPIO pin or external device.
-     *
-     * - GPIO_DRIVE_CAP_0: ~5 mA
-     * - GPIO_DRIVE_CAP_1: ~10 mA
-     * - GPIO_DRIVE_CAP_2: ~20 mA
-     * - GPIO_DRIVE_CAP_3: ~40 mA
 
-    gpio_set_drive_capability(GPIO_MOSI, GPIO_DRIVE_CAP_3);
-    gpio_set_drive_capability(GPIO_SCLK, GPIO_DRIVE_CAP_3);
-    gpio_set_drive_capability(GPIO_CS, GPIO_DRIVE_CAP_3);
-
-    **/
 
     //Initialize SPI slave interface
     ret = spi_slave_initialize(RCV_HOST, &buscfg, &slvcfg, SPI_DMA_CH_AUTO);
     assert(ret == ESP_OK);
 
-    char *sendbuf = spi_bus_dma_memory_alloc(RCV_HOST, 129, 0);
-    char *recvbuf = spi_bus_dma_memory_alloc(RCV_HOST, 129, 0);
+    char *sendbuf = spi_bus_dma_memory_alloc(RCV_HOST, 6, 0);
+    uint8_t *recvbuf = spi_bus_dma_memory_alloc(RCV_HOST, 6, 0);
     assert(sendbuf && recvbuf);
     spi_slave_transaction_t t = {0};
+    uint16_t x,y;
+    while (1) {
+        //Clear receive buffer, set send buffer to something sane
+        memset(recvbuf, 0, 6);
+        sprintf(sendbuf, "AAAAA");
+
+        //Set up a transaction of 128 bytes to send/receive
+        t.length = 6 * 8;
+        t.tx_buffer = sendbuf;
+        t.rx_buffer = recvbuf;
+        /* This call enables the SPI slave interface to send/receive to the sendbuf and recvbuf. The transaction is
+        initialized by the SPI master, however, so it will not actually happen until the master starts a hardware transaction
+        by pulling CS low and pulsing the clock etc. In this specific example, we use the handshake line, pulled up by the
+        .post_setup_cb callback that is called as soon as a transaction is ready, to let the master know it is free to transfer
+        data.
+        */
+        ret = spi_slave_transmit(RCV_HOST, &t, portMAX_DELAY);
+        
+        //spi_slave_transmit does not return until the master has done a transmission, so by here we have sent our data and
+        //received data from the master. Print it.
+        
+        if(recvbuf[3] != 0x67) continue;
+
+        x = (recvbuf[1] << 8) + recvbuf[2];
+        y = (recvbuf[4] << 8) + recvbuf[5];
+        printf("Received X: %u Y: %u\n", x,y);
+        if (state == BT_CONNECTED)
+            send_mouse_absolute(0x00, x, y);
+
+        // ret = spi_slave_disable(RCV_HOST);
+        // if (ret == ESP_OK) {
+            // printf("slave paused ...\n");
+        // }
+        // vTaskDelay(10);    //now is able to sleep or do something to save power, any following transaction will be ignored
+        // ret = spi_slave_enable(RCV_HOST);
+        // if (ret == ESP_OK) {
+            // printf("slave ready !\n");
+        // }
+        n++;
+    }
+}
 
 
-    // TRANSFORMAR ISSO AQUI EM UMA TASK DO FREERTOS
-    
-    // while (1) {
-    //     //Clear receive buffer, set send buffer to something sane
-    //     memset(recvbuf, 0xA5, 129);
-    //     sprintf(sendbuf, "This is the receiver, sending data for transmission number %04d.", n);
+void ble_hid_task_start_up(void)
+{
+    if (s_ble_hid_param.task_hdl) {
+        return; // task ja existe
+    }
+    // xTaskCreate(ble_hid_demo_task_mouse, "ble_hid_demo_task_mouse", 3 * 1024, NULL,
+                // configMAX_PRIORITIES - 3, &s_ble_hid_param.task_hdl);
+}
 
-    //     //Set up a transaction of 128 bytes to send/receive
-    //     t.length = 128 * 8;
-    //     t.tx_buffer = sendbuf;
-    //     t.rx_buffer = recvbuf;
-    //     /* This call enables the SPI slave interface to send/receive to the sendbuf and recvbuf. The transaction is
-    //     initialized by the SPI master, however, so it will not actually happen until the master starts a hardware transaction
-    //     by pulling CS low and pulsing the clock etc. In this specific example, we use the handshake line, pulled up by the
-    //     .post_setup_cb callback that is called as soon as a transaction is ready, to let the master know it is free to transfer
-    //     data.
-    //     */
-    //     ret = spi_slave_transmit(RCV_HOST, &t, portMAX_DELAY);
+static void ble_hid_task_shut_down(void)
+{
+    if (s_ble_hid_param.task_hdl) {
+        vTaskDelete(s_ble_hid_param.task_hdl);
+        s_ble_hid_param.task_hdl = NULL;
+    }
+}
 
-    //     //spi_slave_transmit does not return until the master has done a transmission, so by here we have sent our data and
-    //     //received data from the master. Print it.
-    //     printf("Received: %s\n", recvbuf);
+static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, int32_t id, void *event_data)
+{
+    esp_hidd_event_t event = (esp_hidd_event_t)id;
+    esp_hidd_event_data_t *param = (esp_hidd_event_data_t *)event_data;
 
-    //     //pause the slave to save power, transaction will also be paused
-    //     ret = spi_slave_disable(RCV_HOST);
-    //     if (ret == ESP_OK) {
-    //         printf("slave paused ...\n");
-    //     }
-    //     vTaskDelay(100);    //now is able to sleep or do something to save power, any following transaction will be ignored
-    //     ret = spi_slave_enable(RCV_HOST);
-    //     if (ret == ESP_OK) {
-    //         printf("slave ready !\n");
-    //     }
-    //     n++;
-    // }
+    switch (event) {
+    case ESP_HIDD_START_EVENT:
+        ESP_LOGI(TAG, "START");
+        esp_hid_ble_gap_adv_start();
+        break;
 
-    //END SPI
+    case ESP_HIDD_CONNECT_EVENT:
+        ESP_LOGI(TAG, "CONNECT");
+        state = BT_CONNECTED;
+        break;
 
+    case ESP_HIDD_PROTOCOL_MODE_EVENT:
+        ESP_LOGI(TAG, "PROTOCOL MODE[%u]: %s", param->protocol_mode.map_index,
+                 param->protocol_mode.protocol_mode ? "REPORT" : "BOOT");
+        break;
+
+    case ESP_HIDD_CONTROL_EVENT:
+        ESP_LOGI(TAG, "CONTROL[%u]: %sSUSPEND", param->control.map_index,
+                 param->control.control ? "EXIT_" : "");
+        if (param->control.control) {
+            ble_hid_task_start_up();   // sai do suspend
+        } else {
+            ble_hid_task_shut_down();  // entra em suspend
+        }
+        break;
+
+    case ESP_HIDD_OUTPUT_EVENT:
+        ESP_LOGI(TAG, "OUTPUT[%u]: %8s ID: %2u, Len: %d, Data:",
+                 param->output.map_index, esp_hid_usage_str(param->output.usage),
+                 param->output.report_id, param->output.length);
+        ESP_LOG_BUFFER_HEX(TAG, param->output.data, param->output.length);
+        break;
+
+    case ESP_HIDD_DISCONNECT_EVENT:
+        state = BT_DISCONNECTED;
+        ESP_LOGI(TAG, "DISCONNECT: %s",
+                 esp_hid_disconnect_reason_str(esp_hidd_dev_transport_get(param->disconnect.dev),
+                                                param->disconnect.reason));
+        ble_hid_task_shut_down();
+        esp_hid_ble_gap_adv_start();
+        break;
+
+    case ESP_HIDD_STOP_EVENT:
+        ESP_LOGI(TAG, "STOP");
+        break;
+
+    default:
+        break;
+    }
+}
+
+static void ble_hid_device_host_task(void *param)
+{
+    ESP_LOGI(TAG, "BLE Host Task Started");
+    nimble_port_run();      // so retorna quando nimble_port_stop() for chamado
+    nimble_port_freertos_deinit();
+}
+
+/* Definida em store.c do exemplo original (persistencia de bonding) */
+void ble_store_config_init(void);
+
+void app_main(void)
+{
+   xTaskCreate(spi_reciever_thread, "SPI Reciever", 1024* 4, NULL, configMAX_PRIORITIES - 3, NULL);
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

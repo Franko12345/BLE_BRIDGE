@@ -5,7 +5,7 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=/home/franko/prog/microcontroladores/projetos/projeto_final/esp_BLE_bridge/BLE_BRIDGE/build"
+    "--compile-commands-dir=/home/franko/prog/microcontroladores/projetos/esp_BLE_bridge/BLE_BRIDGE/build"
   ],
   "idf.currentSetup": "/home/franko/.espressif/v6.0.1/esp-idf",
   "idf.openOcdConfigs": [
