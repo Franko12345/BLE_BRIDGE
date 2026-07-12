@@ -1,22 +1,23 @@
-/*
- * SPDX-FileCopyrightText: 2021-2026 Espressif Systems (Shanghai) CO LTD
- *
- * SPDX-License-Identifier: Unlicense OR CC0-1.0
- *
- * Versao enxuta do exemplo esp_hid_device:
- *   - Somente NimBLE (Bluetooth Classic, SDP e Bluedroid foram removidos)
- *   - Somente role de MOUSE (teclado e consumer control removidos)
- *   - Report Map alterado para coordenadas ABSOLUTAS (X/Y de 16 bits, 0-32767)
- *
- * Pre-requisito no menuconfig:
- *   Component config -> Bluetooth -> Host = NimBLE - Host
- *   Component config -> Bluetooth -> Bluetooth Controller = Enabled (BLE only)
- */
-
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <math.h>
+
+#include <mpu6050.h>
+#include "esp_timer.h"
+
+// Globais para os ângulos do MPU6050, que poderão ser usados pela task do Mouse
+volatile int16_t global_pitch = 0;
+volatile int16_t global_roll = 0;
+
+// Offsets de calibração
+float gyro_x_offset = -0.84f;
+float gyro_y_offset = 0.65f;
+float gyro_z_offset = 0.13f;
+float accel_x_offset = 0.0217f;
+float accel_y_offset = 0.0953f;
+
 
 #include "driver/spi_slave.h"
 #include "driver/gpio.h"
@@ -31,30 +32,38 @@
 #include "nimble/nimble_port_freertos.h"
 
 
+#define ADDR MPU6050_I2C_ADDRESS_LOW
+
+#define CONFIG_EXAMPLE_MPU6050_I2C_MASTER_SDA 0
+#define CONFIG_EXAMPLE_MPU6050_I2C_MASTER_SCL 1
+
 #include "esp_hidd.h"
 #include "esp_hid_gap.h"
+#include <esp_err.h>
 
 
 #define RCV_HOST    SPI2_HOST
 
-#define GPIO_HANDSHAKE      10
+// #define GPIO_HANDSHAKE      10
 #define GPIO_MOSI           6
 #define GPIO_MISO           5
 #define GPIO_SCLK           4
 #define GPIO_CS             7
 
+#define MSB(x) ((uint8_t)((x >> 8) & 0xFF))
+#define LSB(x) ((uint8_t)(x & 0xFF))
+
 //Called after a transaction is queued and ready for pickup by master. We use this to set the handshake line high.
 void my_post_setup_cb(spi_slave_transaction_t *trans)
 {
-    gpio_set_level(GPIO_HANDSHAKE, 1);
+    // gpio_set_level(GPIO_HANDSHAKE, 1);
 }
 
 //Called after transaction is sent/received. We use this to set the handshake line low.
 void my_post_trans_cb(spi_slave_transaction_t *trans)
 {
-    gpio_set_level(GPIO_HANDSHAKE, 0);
+    // gpio_set_level(GPIO_HANDSHAKE, 0);
 }
-
 
 static const char *TAG = "HID_MOUSE_DEMO";
 
@@ -129,6 +138,122 @@ static esp_hid_device_config_t ble_hid_config = {
     .report_maps_len   = 1
 };
 
+void calibrate_mpu6050(mpu6050_dev_t *dev) {
+    ESP_LOGI(TAG, "Iniciando calibracao... MANTENHA O SENSOR PARADO!");
+    int num_samples = 200; // ~1 segundo
+    float sum_gx = 0, sum_gy = 0, sum_gz = 0;
+    float sum_ax = 0, sum_ay = 0;
+    
+    mpu6050_acceleration_t accel;
+    mpu6050_rotation_t rotation;
+
+    // Descartar primeiras leituras para estabilizar
+    for (int i = 0; i < 50; i++) {
+        mpu6050_get_motion(dev, &accel, &rotation);
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    // Acumular amostras
+    for (int i = 0; i < num_samples; i++) {
+        mpu6050_get_motion(dev, &accel, &rotation);
+        sum_gx += rotation.x;
+        sum_gy += rotation.y;
+        sum_gz += rotation.z;
+        sum_ax += accel.x;
+        sum_ay += accel.y;
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    // Se preferir hardcodar (colar os valores fixos) depois para nao precisar
+    // ficar com a mao parada ao ligar, pegue esses valores do log e substitua
+    // as globais de offset no topo do arquivo.
+    gyro_x_offset = sum_gx / num_samples;
+    gyro_y_offset = sum_gy / num_samples;
+    gyro_z_offset = sum_gz / num_samples;
+    accel_x_offset = sum_ax / num_samples;
+    accel_y_offset = sum_ay / num_samples;
+    
+    ESP_LOGI(TAG, "Calibracao concluida! Para hardcodar e pular essa etapa, anote os valores abaixo:");
+    ESP_LOGI(TAG, "Offsets - Gyro: X=%.2f Y=%.2f Z=%.2f", gyro_x_offset, gyro_y_offset, gyro_z_offset);
+    ESP_LOGI(TAG, "Offsets - Accel: X=%.4f Y=%.4f", accel_x_offset, accel_y_offset);
+}
+
+void mpu6050_test(void *pvParameters)
+{
+    mpu6050_dev_t dev = { 0 };
+
+    ESP_ERROR_CHECK(mpu6050_init_desc(&dev, ADDR, 0, 0, 1));
+
+    while (1)
+    {
+        esp_err_t res = i2c_dev_probe(&dev.i2c_dev, I2C_DEV_WRITE);
+        if (res == ESP_OK)
+        {
+            ESP_LOGI(TAG, "Found MPU6050 device");
+            break;
+        }
+        ESP_LOGE(TAG, "Probe falhou: %s (%d)",
+         esp_err_to_name(res), res);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+
+    ESP_ERROR_CHECK(mpu6050_init(&dev));
+
+    ESP_LOGI(TAG, "Accel range: %d", dev.ranges.accel);
+    ESP_LOGI(TAG, "Gyro range:  %d", dev.ranges.gyro);
+
+    // Chama a calibração antes do loop
+    // DICA: Se voce hardcodar os valores globais la no topo, comente a linha abaixo!
+    calibrate_mpu6050(&dev);
+
+    float pitch = 0.0f;
+    float roll = 0.0f;
+    uint64_t last_time = esp_timer_get_time();
+
+    while (1)
+    {
+        float temp;
+        mpu6050_acceleration_t accel = { 0 };
+        mpu6050_rotation_t rotation = { 0 };
+
+        ESP_ERROR_CHECK(mpu6050_get_temperature(&dev, &temp));
+        ESP_ERROR_CHECK(mpu6050_get_motion(&dev, &accel, &rotation));
+
+        // Aplicar Offsets calibrados
+        accel.x -= accel_x_offset;
+        accel.y -= accel_y_offset;
+        rotation.x -= gyro_x_offset;
+        rotation.y -= gyro_y_offset;
+        rotation.z -= gyro_z_offset;
+
+        uint64_t current_time = esp_timer_get_time();
+        float dt = (current_time - last_time) / 1000000.0f;
+        last_time = current_time;
+
+        // Calcular os ângulos usando apenas o acelerômetro
+        float accel_pitch = atan2(-accel.x, sqrt(accel.y * accel.y + accel.z * accel.z)) * 180.0 / M_PI;
+        float accel_roll = atan2(accel.y, accel.z) * 180.0 / M_PI;
+
+        // Aplicar o Filtro Complementar original (direto)
+        pitch = 0.95 * (pitch + rotation.y * dt) + 0.05 * accel_pitch;
+        roll = 0.95 * (roll + rotation.x * dt) + 0.05 * accel_roll;
+        
+        // Atualizar as variáveis globais
+        global_pitch = (int16_t)(pitch*10.0f);
+        global_roll = (int16_t)(roll*10.0f);
+
+        // ESP_LOGI(TAG, "**********************************************************************");
+        // ESP_LOGI(TAG, "Acceleration: x=%.4f   y=%.4f   z=%.4f", accel.x, accel.y, accel.z);
+        // ESP_LOGI(TAG, "Rotation:     x=%.4f   y=%.4f   z=%.4f", rotation.x, rotation.y, rotation.z);
+        // ESP_LOGI(TAG, "Temperature:  %.1f", temp);
+        // ESP_LOGI(TAG, "Angles:       Pitch=%.2f  Roll=%.2f", pitch, roll);
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+
 /* Envia posicao absoluta (0..32767) + estado dos botoes */
 void send_mouse_absolute(uint8_t buttons, uint16_t x, uint16_t y)
 {
@@ -140,10 +265,6 @@ void send_mouse_absolute(uint8_t buttons, uint16_t x, uint16_t y)
     buffer[4] = (uint8_t)(y >> 8);
     esp_hidd_dev_input_set(s_ble_hid_param.hid_dev, 0, 0, buffer, sizeof(buffer));
 }
-
-/* Task de demonstracao via serial: move o cursor para posicoes fixas
- * usando teclas de teste. Substitua pela sua fonte real de coordenadas
- * (touchscreen, sensor, etc.) */
 
 static void spi_reciever_thread(void *pvParameters){
         int n = 0;
@@ -172,7 +293,7 @@ static void spi_reciever_thread(void *pvParameters){
     gpio_config_t io_conf = {
         .intr_type = GPIO_INTR_DISABLE,
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = BIT64(GPIO_HANDSHAKE),
+        .pin_bit_mask = BIT64(8),
     };
 
     //Configure handshake line as output
@@ -196,7 +317,15 @@ static void spi_reciever_thread(void *pvParameters){
     while (1) {
         //Clear receive buffer, set send buffer to something sane
         memset(recvbuf, 0, 6);
-        sprintf(sendbuf, "AAAAA");
+
+        //SendBuf formatting
+
+        sendbuf[0] = (uint8_t)state;
+        sendbuf[1] = MSB(global_pitch);
+        sendbuf[2] = LSB(global_pitch);
+        sendbuf[3] = 0x68;
+        sendbuf[4] = MSB(global_roll);
+        sendbuf[5] = LSB(global_roll);
 
         //Set up a transaction of 128 bytes to send/receive
         t.length = 6 * 8;
@@ -217,7 +346,7 @@ static void spi_reciever_thread(void *pvParameters){
 
         x = (recvbuf[1] << 8) + recvbuf[2];
         y = (recvbuf[4] << 8) + recvbuf[5];
-        printf("Received X: %u Y: %u\n", x,y);
+        // printf("Received X: %u Y: %u\n", x,y);
         if (state == BT_CONNECTED)
             send_mouse_absolute(0x00, x, y);
 
@@ -320,7 +449,11 @@ void ble_store_config_init(void);
 
 void app_main(void)
 {
-   xTaskCreate(spi_reciever_thread, "SPI Reciever", 1024* 4, NULL, configMAX_PRIORITIES - 3, NULL);
+    ESP_ERROR_CHECK(i2cdev_init());
+    
+    xTaskCreate(mpu6050_test, "mpu6050_test", configMINIMAL_STACK_SIZE * 6, NULL, 5, NULL);
+
+    xTaskCreate(spi_reciever_thread, "SPI Reciever", 1024* 4, NULL, configMAX_PRIORITIES - 3, NULL);
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

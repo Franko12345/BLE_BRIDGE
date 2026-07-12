@@ -1,38 +1,49 @@
-menu "HID Example Configuration"
-    config EXAMPLE_SSP_ENABLED
-        bool "Secure Simple Pairing"
-        depends on BT_CLASSIC_ENABLED
-        default y
-        help
-            This enables the Secure Simple Pairing. If disable this option,
-            Bluedroid will only support Legacy Pairing
+menu "Project Configuration"
 
-    choice EXAMPLE_HID_DEVICE_ROLE
-        prompt "HID Device Role"
-        depends on BT_NIMBLE_ENABLED
-        default EXAMPLE_MEDIA_ENABLE
-        help
-            Three Supported Roles for Device
-            - Media Device
-            - Keyboard
-            - Mouse
-
-        config EXAMPLE_MEDIA_ENABLE
-            select BT_NIMBLE_HID_SERVICE
-            bool "Enable Media Device"
-
-        config EXAMPLE_KBD_ENABLE
-            select BT_NIMBLE_HID_SERVICE
-            bool "Enable Keyboard Device"
-
+    menu "HID (BLE Mouse)"
+        # Garante que o componente NimBLE HID Service seja habilitado.
+        # Nao aparece como opcao selecionavel porque so existe um role (mouse).
         config EXAMPLE_MOUSE_ENABLE
+            bool
+            depends on BT_NIMBLE_ENABLED
             select BT_NIMBLE_HID_SERVICE
-            bool "Enable Mouse Device"
-    endchoice
+            default y
+    endmenu
 
-    config EXAMPLE_HID_DEVICE_ROLE
-        int
-        default 1 if EXAMPLE_MEDIA_ENABLE
-        default 2 if EXAMPLE_KBD_ENABLE
-        default 3 if EXAMPLE_MOUSE_ENABLE
+    menu "MPU6050 (I2C)"
+        choice EXAMPLE_MPU6050_I2C_ADDRESS
+            prompt "Select I2C address"
+            default EXAMPLE_MPU6050_I2C_ADDRESS_LOW
+            help
+                Endereco I2C do MPU6050. Depende do nivel do pino AD0 do sensor.
+
+            config EXAMPLE_MPU6050_I2C_ADDRESS_LOW
+                bool "MPU6050_I2C_ADDRESS_LOW (0x68)"
+                help
+                    Escolha esta opcao quando o pino AD0 estiver ligado ao GND.
+
+            config EXAMPLE_MPU6050_I2C_ADDRESS_HIGH
+                bool "MPU6050_I2C_ADDRESS_HIGH (0x69)"
+                help
+                    Escolha esta opcao quando o pino AD0 estiver ligado ao VCC.
+        endchoice
+
+        config EXAMPLE_MPU6050_SCL_GPIO
+            int "MPU6050 SCL GPIO Number"
+            # Evita GPIO4/5 (ja usados pelo SPI slave) e GPIO9 (strapping pin de boot)
+            default 1
+            help
+                GPIO usado para a linha SCL (clock) do I2C do MPU6050.
+                Na ESP32-C3 SuperMini, evite GPIO2/8/9 (strapping pins),
+                GPIO18/19 (USB) e GPIO20/21 (UART0/log), e qualquer pino
+                ja usado pelo barramento SPI.
+
+        config EXAMPLE_MPU6050_SDA_GPIO
+            int "MPU6050 SDA GPIO Number"
+            default 0
+            help
+                GPIO usado para a linha SDA (dados) do I2C do MPU6050.
+                Mesmas restricoes do SCL acima.
+    endmenu
+
 endmenu
