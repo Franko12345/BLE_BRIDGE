@@ -816,6 +816,22 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "connection %s; status=%d",
                 event->connect.status == 0 ? "established" : "failed",
                 event->connect.status);
+        if (event->connect.status == 0) {
+            /* Pede um intervalo de conexao curto para elevar a taxa de reports
+             * (mouse fluido no desenho). itvl em unidades de 1.25 ms:
+             * 6..12 = 7.5..15 ms -> ate ~130 Hz. O central (BlueZ) decide se
+             * aceita; o valor real negociado aparece em CONN_UPDATE abaixo. */
+            struct ble_gap_upd_params cp = {
+                .itvl_min = 6,   /* 7.5 ms */
+                .itvl_max = 12,  /* 15 ms  */
+                .latency = 0,
+                .supervision_timeout = 500, /* 5 s (unidades de 10 ms) */
+                .min_ce_len = 0,
+                .max_ce_len = 0,
+            };
+            rc = ble_gap_update_params(event->connect.conn_handle, &cp);
+            ESP_LOGI(TAG, "conn param update requested; rc=%d", rc);
+        }
         return 0;
         break;
     case BLE_GAP_EVENT_DISCONNECT:
@@ -826,6 +842,12 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
         /* The central has updated the connection parameters. */
         ESP_LOGI(TAG, "connection updated; status=%d",
                 event->conn_update.status);
+        if (ble_gap_conn_find(event->conn_update.conn_handle, &desc) == 0) {
+            /* conn_itvl em unidades de 1.25 ms -> ms = itvl * 5 / 4 */
+            ESP_LOGI(TAG, "  conn_itvl=%d (~%d ms) latency=%d timeout=%d",
+                     desc.conn_itvl, (desc.conn_itvl * 5) / 4,
+                     desc.conn_latency, desc.supervision_timeout);
+        }
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -861,7 +883,16 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
             assert(rc == 0);
             ble_hid_task_start_up();
         } else {
-            ESP_LOGW(TAG, "encryption failed; waiting for disconnect/retry");
+            /* A criptografia falhou (tipicamente a chave/bond nao casa mais com
+             * o central). Apaga o bond local para que a proxima conexao faca um
+             * pareamento novo em vez de repetir a falha para sempre (loop de
+             * conecta-e-cai). O central desconecta em seguida. */
+            ESP_LOGW(TAG, "encryption failed (status=%d); apagando bond p/ re-parear",
+                     event->enc_change.status);
+            rc = ble_gap_conn_find(event->enc_change.conn_handle, &desc);
+            if (rc == 0) {
+                ble_store_util_delete_peer(&desc.peer_id_addr);
+            }
         }
         return 0;
 
@@ -933,6 +964,17 @@ esp_err_t esp_hid_ble_gap_adv_start(void)
     /* maximum possible duration for hid device(180s) */
     int32_t adv_duration_ms = 180000;
 
+    /* Deixa a stack escolher o tipo de endereco proprio conforme bonding/
+     * privacidade. Necessario para que a resolucao do endereco (RPA) do central
+     * funcione na reconexao; senao a chave (LTK) nao e encontrada e a
+     * criptografia falha. Fallback para endereco publico em caso de erro. */
+    uint8_t own_addr_type;
+    rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    if (rc != 0) {
+        MODLOG_DFLT(ERROR, "ble_hs_id_infer_auto failed; rc=%d, using public\n", rc);
+        own_addr_type = BLE_OWN_ADDR_PUBLIC;
+    }
+
     rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "error setting advertisement data; rc=%d\n", rc);
@@ -944,7 +986,7 @@ esp_err_t esp_hid_ble_gap_adv_start(void)
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
     adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(30);/* Recommended interval 30ms to 50ms */
     adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(50);
-    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, adv_duration_ms,
+    rc = ble_gap_adv_start(own_addr_type, NULL, adv_duration_ms,
                            &adv_params, nimble_hid_gap_event, NULL);
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "error enabling advertisement; rc=%d\n", rc);

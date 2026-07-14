@@ -437,7 +437,7 @@ void mpu6050_test(void *pvParameters)
         // ESP_LOGI(TAG, "Temperature:  %.1f", temp);
         // ESP_LOGI(TAG, "Angles: Pitch=%.2f  Roll=%.2f  Yaw=%.2f", -pitch, roll, yaw);
 
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(3));
     }
 }
 
@@ -572,6 +572,11 @@ static void spi_reciever_thread(void *pvParameters){
 
 void ble_hid_task_start_up(void)
 {
+    // Chamado apos ENC_CHANGE com sucesso (link ja criptografado). So aqui
+    // liberamos o envio de reports HID, para nao notificar num link ainda
+    // nao criptografado/sem subscricao durante a reconexao.
+    state = BT_CONNECTED;
+
     if (s_ble_hid_param.task_hdl) {
         return; // task ja existe
     }
@@ -600,7 +605,9 @@ static void ble_hidd_event_callback(void *handler_args, esp_event_base_t base, i
 
     case ESP_HIDD_CONNECT_EVENT:
         ESP_LOGI(TAG, "CONNECT");
-        state = BT_CONNECTED;
+        // NAO marca BT_CONNECTED aqui: o link ainda nao esta criptografado.
+        // O envio de reports so e liberado em ble_hid_task_start_up(), chamado
+        // apos BLE_GAP_EVENT_ENC_CHANGE com sucesso.
         break;
 
     case ESP_HIDD_PROTOCOL_MODE_EVENT:
